@@ -97,8 +97,6 @@ temp_data/
 .env
 .venv
 venv/
-env/
-ENV/
 Pipfile.lock
 poetry.lock
 conda-meta/
