@@ -236,14 +236,11 @@ If you find our code useful, please cite [our paper](https://arxiv.org/abs/2510.
 
 ```BibTeX
 
-@misc{kachaev2025dontblindvlaaligning,
-      title={Don't Blind Your VLA: Aligning Visual Representations for OOD Generalization}, 
-      author={Nikita Kachaev and Mikhail Kolosov and Daniil Zelezetsky and Alexey K. Kovalev and Aleksandr I. Panov},
-      year={2025},
-      eprint={2510.25616},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2510.25616}, 
+@article{kachaev2025don,
+  title={Don't Blind Your VLA: Aligning Visual Representations for OOD Generalization},
+  author={Kachaev, Nikita and Kolosov, Mikhail and Zelezetsky, Daniil and Kovalev, Alexey K and Panov, Aleksandr I},
+  journal={arXiv preprint arXiv:2510.25616},
+  year={2025}
 }
 
 ```
