@@ -1,0 +1,35 @@
+[build-system]
+requires = [
+    "setuptools>=68",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blindvla"
+version = "0.1.0"
+description = "Workspace-level environment for BlindVLA"
+readme = "README.md"
+requires-python = "==3.10.*"
+dependencies = [
+  "openvla",
+  "mani_skill",
+  "simpler_env",
+  "torch",
+  "torchvision",
+  "torchaudio",
+  "diffusers",
+  "packaging",
+  "ninja",
+  "typeguard",
+  "lerobot @ git+https://github.com/huggingface/lerobot@d602e8169cbad9e93a4a3b3ee1dd8b332af7ebf8",
+  "pdbpp>=0.11.7",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.uv.sources]
+openvla = { path = "openvla", editable = true }
+mani_skill = { path = "ManiSkill", editable = true }
+simpler_env = { path = "SimplerEnv", editable = true }
