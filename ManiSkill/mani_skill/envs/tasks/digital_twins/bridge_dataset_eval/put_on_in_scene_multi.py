@@ -1773,7 +1773,14 @@ class PutOnPlateInScene25MultiCarrot(PutOnPlateInScene25MainV3):
         lp = len(self.plate_names)
         l1 = len(self.xyz_configs)
         l2 = len(self.quat_configs)
-        ltt = lc * le * lp * lo * l1 * l2
+        
+        # 对每个carrot组合，生成5种不同的setting
+        num_settings_per_carrot_combo = 5
+        # carrot组合总数: lc * le
+        # 每个组合的setting数: num_settings_per_carrot_combo
+        # 每个setting包含: lp * lo * l1 * l2 种组合
+        # 总episode数: lc * le * num_settings_per_carrot_combo * lp * lo * l1 * l2
+        ltt = lc * le * num_settings_per_carrot_combo * lp * lo * l1 * l2
 
         # rand and select
         episode_id = options.get("episode_id",
@@ -1781,13 +1788,42 @@ class PutOnPlateInScene25MultiCarrot(PutOnPlateInScene25MainV3):
         episode_id = episode_id.reshape(b)
         episode_id = episode_id % ltt
 
-        self.select_carrot_ids = episode_id // (le * lp * lo * l1 * l2) + lc_offset  # [b]
-        self.select_extra_ids = (episode_id // (lp * lo * l1 * l2)) % le  # [b]
-        self.select_extra_ids = (self.select_carrot_ids + self.select_extra_ids + 1) % lc + lc_offset  # [b]
-        self.select_plate_ids = (episode_id // (lo * l1 * l2)) % lp
-        self.select_overlay_ids = (episode_id // (l1 * l2)) % lo + lo_offset
-        self.select_pos_ids = (episode_id // l2) % l1
-        self.select_quat_ids = episode_id % l2
+        # 解码episode_id
+        # 结构: [carrot_combo_id][setting_id][plate][overlay][pos][quat]
+        # episode_id = carrot_combo_id * (num_settings_per_carrot_combo * lp * lo * l1 * l2) 
+        #            + setting_id * (lp * lo * l1 * l2)
+        #            + plate_id * (lo * l1 * l2)
+        #            + overlay_id * (l1 * l2)
+        #            + pos_id * l2
+        #            + quat_id
+        
+        setting_factor = lp * lo * l1 * l2
+        carrot_combo_setting_id = episode_id // setting_factor  # [b]
+        
+        # 从carrot_combo_setting_id中提取carrot组合和setting索引
+        carrot_combo_id = carrot_combo_setting_id // num_settings_per_carrot_combo  # [b]
+        setting_id = carrot_combo_setting_id % num_settings_per_carrot_combo  # [b]
+        
+        # 解码carrot组合
+        self.select_carrot_ids = (carrot_combo_id // le) + lc_offset  # [b]
+        extra_carrot_offset = carrot_combo_id % le  # [b]
+        self.select_extra_ids = (self.select_carrot_ids + extra_carrot_offset + 1) % lc + lc_offset  # [b]
+        
+        # 解码setting（plate, overlay, pos, quat）
+        # 使用setting_id来确保每个carrot组合有5种不同的setting
+        # 方法：使用setting_id来偏移setting的选择，确保多样性
+        remaining_id = episode_id % setting_factor
+        
+        # 使用setting_id和carrot_combo_id来生成一个偏移量，确保每个carrot组合有5种不同的setting
+        # 使用一个较大的质数来确保偏移量的多样性
+        prime_offset = 7919  # 一个较大的质数
+        setting_offset = (carrot_combo_id * num_settings_per_carrot_combo + setting_id) * prime_offset
+        adjusted_setting_id = (remaining_id + setting_offset) % setting_factor
+        
+        self.select_plate_ids = (adjusted_setting_id // (lo * l1 * l2)) % lp
+        self.select_overlay_ids = (adjusted_setting_id // (l1 * l2)) % lo + lo_offset
+        self.select_pos_ids = (adjusted_setting_id // l2) % l1
+        self.select_quat_ids = adjusted_setting_id % l2
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         self._initialize_episode_pre(env_idx, options)
@@ -1796,11 +1832,25 @@ class PutOnPlateInScene25MultiCarrot(PutOnPlateInScene25MainV3):
 
         # rgb overlay
         sensor = self._sensor_configs[self.rgb_camera_name]
-        assert sensor.width == 640
-        assert sensor.height == 480
-        overlay_images = np.stack([self.overlay_images_numpy[idx] for idx in self.select_overlay_ids])
+        target_width = sensor.width
+        target_height = sensor.height
+        # Resize overlay images to match camera resolution if needed
+        overlay_images = []
+        for idx in self.select_overlay_ids:
+            img = self.overlay_images_numpy[idx]
+            if img.shape[1] != target_width or img.shape[0] != target_height:
+                img = cv2.resize(img, (target_width, target_height))
+            overlay_images.append(img)
+        overlay_images = np.stack(overlay_images)
         self.overlay_images = torch.tensor(overlay_images, device=self.device)  # [b, H, W, 3]
-        overlay_textures = np.stack([self.overlay_textures_numpy[idx] for idx in self.select_overlay_ids])
+        
+        overlay_textures = []
+        for idx in self.select_overlay_ids:
+            tex = self.overlay_textures_numpy[idx]
+            if tex.shape[1] != target_width or tex.shape[0] != target_height:
+                tex = cv2.resize(tex, (target_width, target_height))
+            overlay_textures.append(tex)
+        overlay_textures = np.stack(overlay_textures)
         self.overlay_textures = torch.tensor(overlay_textures, device=self.device)  # [b, H, W, 3]
         overlay_mix = np.array([self.overlay_mix_numpy[idx] for idx in self.select_overlay_ids])
         self.overlay_mix = torch.tensor(overlay_mix, device=self.device)  # [b]
@@ -1921,6 +1971,534 @@ class PutOnPlateInScene25MultiCarrot(PutOnPlateInScene25MainV3):
             gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
             carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
         )
+
+
+@register_env("PutOnPlateInScene25MultiCarrot2-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])
+class PutOnPlateInScene25MultiCarrot2(PutOnPlateInScene25MainV3):
+    select_extra_ids: torch.Tensor
+
+    def _generate_init_pose(self):
+        xy_center = np.array([-0.16, 0.00]).reshape(1, 2)
+        # Increased half_edge_length to ensure minimum distance >= 0.070m between regions
+        # Grid spacing calculation: normalized spacing (0.2) * 2 * half_edge_length = 0.4 * half_edge_length
+        # For 0.070m requirement: 0.4 * half_edge_length >= 0.070 -> half_edge_length >= 0.175
+        # Using 0.18 to provide safety margin: grid spacing ~0.072m, total range 0.36m x 0.36m
+        half_edge_length = np.array([0.12, 0.12]).reshape(1, 2)
+
+        grid_pos = np.array([
+            [0.0, 0.0], [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8], [0.0, 1.0],
+            [0.2, 0.0], [0.2, 0.2], [0.2, 0.4], [0.2, 0.6], [0.2, 0.8], [0.2, 1.0],
+            [0.4, 0.0], [0.4, 0.2], [0.4, 0.4], [0.4, 0.6], [0.4, 0.8], [0.4, 1.0],
+            [0.6, 0.0], [0.6, 0.2], [0.6, 0.4], [0.6, 0.6], [0.6, 0.8], [0.6, 1.0],
+            [0.8, 0.0], [0.8, 0.2], [0.8, 0.4], [0.8, 0.6], [0.8, 0.8], [0.8, 1.0],
+            [1.0, 0.0], [1.0, 0.2], [1.0, 0.4], [1.0, 0.6], [1.0, 0.8], [1.0, 1.0],
+        ]) * 2 - 1  # [36, 2]
+        grid_pos = grid_pos * half_edge_length + xy_center
+
+        # Define center region (for plate) and 4 quadrants (for carrots)
+        # Center region: inner 2x2 area (4 positions) for plate
+        center_region_indices = np.array([14, 15, 20, 21])  # 2x2 center: rows 2-3, cols 2-3
+        
+        # Hardcode 4 quadrants for carrots (6x6 grid):
+        # Grid layout:
+        # Row 0: 0,  1,  2,  3,  4,  5
+        # Row 1: 6,  7,  8,  9,  10, 11
+        # Row 2: 12, 13, 14, 15, 16, 17
+        # Row 3: 18, 19, 20, 21, 22, 23
+        # Row 4: 24, 25, 26, 27, 28, 29
+        # Row 5: 30, 31, 32, 33, 34, 35
+        # Center (plate): [14, 15, 20, 21] - row 2-3, col 2-3
+        # 0: top-left
+        # 1: bottom-left  
+        # 2: top-right
+        # 3: bottom-right
+        # Following the pattern of top-left [0, 1, 7, 8]:
+        # - row 0: col 0-1 -> [0, 1]
+        # - row 1: col 1-2 -> [7, 8]
+        # Applying same pattern to other quadrants (avoiding center region [14,15,20,21]):
+        self.carrot_quadrant_indices = [
+            np.array([0, 1, 6, 7]),       # top-left: row 0 col 0-1, row 1 col 1-2
+            np.array([24, 25, 30, 31]),   # bottom-left: row 2 col 0-1, row 3 col 0-1 (avoiding center)
+            np.array([4, 5, 10, 11]),      # top-right: row 0 col 2-3, row 1 col 3-4
+            np.array([28, 29, 34, 35]),   # bottom-right: row 2 col 4-5, row 3 col 4-5
+        ]
+        
+        # Store center region indices for plate
+        self.center_region_indices = center_region_indices
+        
+        # Print region information
+        print(f"Center region (plate): {len(center_region_indices)} positions")
+        for q_idx, quadrant_indices in enumerate(self.carrot_quadrant_indices):
+            quadrant_names = ["top-left", "bottom-left", "top-right", "bottom-right"]
+            print(f"Quadrant {q_idx} ({quadrant_names[q_idx]}): {len(quadrant_indices)} positions {quadrant_indices}")
+
+        xyz_configs = []
+        max_configs = 1000  # Limit maximum configurations to avoid very long initialization
+        # Use early pruning to reduce computation: check constraints as early as possible
+        # Note: We don't need random permutation here because positions are now selected
+        # independently from grid_pos in _initialize_episode_pre, not from xyz_configs
+        should_break = False
+        for i, grid_pos_1 in enumerate(grid_pos):
+            if should_break:
+                break
+            for j, grid_pos_2 in enumerate(grid_pos):
+                if should_break:
+                    break
+                # Early check: carrot and plate must be far enough
+                if np.linalg.norm(grid_pos_1 - grid_pos_2) <= 0.070:
+                    continue
+                for k, grid_pos_3 in enumerate(grid_pos):
+                    if should_break:
+                        break
+                    # Early check: extra carrot 1 must be far from plate
+                    if np.linalg.norm(grid_pos_3 - grid_pos_2) <= 0.070:
+                        continue
+                    # Early check: extra carrot 1 must be far from main carrot
+                    if np.linalg.norm(grid_pos_1 - grid_pos_3) <= 0.10:
+                        continue
+                    for l, grid_pos_4 in enumerate(grid_pos):
+                        if should_break:
+                            break
+                        # Early check: extra carrot 2 must be far from plate
+                        if np.linalg.norm(grid_pos_4 - grid_pos_2) <= 0.070:
+                            continue
+                        # Early check: extra carrot 2 must be far from main carrot
+                        if np.linalg.norm(grid_pos_1 - grid_pos_4) <= 0.10:
+                            continue
+                        # Early check: extra carrot 2 must be far from extra carrot 1
+                        if np.linalg.norm(grid_pos_3 - grid_pos_4) <= 0.10:
+                            continue
+                        for m, grid_pos_5 in enumerate(grid_pos):
+                            if should_break:
+                                break
+                            # Early check: extra carrot 3 must be far from plate
+                            if np.linalg.norm(grid_pos_5 - grid_pos_2) <= 0.070:
+                                continue
+                            # Early check: extra carrot 3 must be far from main carrot
+                            if np.linalg.norm(grid_pos_1 - grid_pos_5) <= 0.10:
+                                continue
+                            # Early check: extra carrot 3 must be far from extra carrot 1
+                            if np.linalg.norm(grid_pos_3 - grid_pos_5) <= 0.10:
+                                continue
+                            # Early check: extra carrot 3 must be far from extra carrot 2
+                            if np.linalg.norm(grid_pos_4 - grid_pos_5) <= 0.10:
+                                continue
+                            # All constraints satisfied
+                            xyz_configs.append(
+                                np.array(
+                                    [
+                                        np.append(grid_pos_1, 0.95),  # carrot
+                                        np.append(grid_pos_2, 0.92),  # plate
+                                        np.append(grid_pos_3, 1.0),  # extra carrot 1
+                                        np.append(grid_pos_4, 1.0),  # extra carrot 2
+                                        np.append(grid_pos_5, 1.0),  # extra carrot 3
+                                    ]
+                                )
+                            )
+                            # Stop if we've reached the maximum number of configurations
+                            if len(xyz_configs) >= max_configs:
+                                should_break = True
+                                break
+        xyz_configs = np.stack(xyz_configs)
+
+        quat_configs = np.stack(
+            [
+                np.array([
+                    euler2quat(0, 0, 0.0),  # carrot
+                    [1, 0, 0, 0],  # plate
+                    [1, 0, 0, 0],  # extra carrot 1
+                    [1, 0, 0, 0],  # extra carrot 2
+                    [1, 0, 0, 0],  # extra carrot 3
+                ]),
+                np.array([
+                    euler2quat(0, 0, np.pi / 4),  # carrot
+                    [1, 0, 0, 0],  # plate
+                    [1, 0, 0, 0],  # extra carrot 1
+                    [1, 0, 0, 0],  # extra carrot 2
+                    [1, 0, 0, 0],  # extra carrot 3
+                ]),
+                np.array([
+                    euler2quat(0, 0, np.pi / 2),  # carrot
+                    [1, 0, 0, 0],  # plate
+                    [1, 0, 0, 0],  # extra carrot 1
+                    [1, 0, 0, 0],  # extra carrot 2
+                    [1, 0, 0, 0],  # extra carrot 3
+                ]),
+                np.array([
+                    euler2quat(0, 0, np.pi * 3 / 4),  # carrot
+                    [1, 0, 0, 0],  # plate
+                    [1, 0, 0, 0],  # extra carrot 1
+                    [1, 0, 0, 0],  # extra carrot 2
+                    [1, 0, 0, 0],  # extra carrot 3
+                ]),
+            ]
+        )
+
+        self.xyz_configs = xyz_configs
+        self.quat_configs = quat_configs
+        
+        # Store grid_pos for independent random position selection
+        self.grid_pos = grid_pos
+
+        print(f"xyz_configs: {xyz_configs.shape}")
+        print(f"quat_configs: {quat_configs.shape}")
+        print(f"grid_pos: {grid_pos.shape}")
+
+    def _initialize_episode_pre(self, env_idx: torch.Tensor, options: dict):
+        # NOTE: this part of code is not GPU parallelized
+        b = len(env_idx)
+        assert b == self.num_envs
+
+        obj_set = options.get("obj_set", "train")
+        # obj_set = 'train'
+        # obj_set = 'test' ##TODO: remove this
+        
+        if obj_set == "train":
+            lc = 16
+            lc_offset = 0
+        elif obj_set == "test":
+            lc = 9
+            lc_offset = 16
+        elif obj_set == "all":
+            lc = 25
+            lc_offset = 0
+        else:
+            raise ValueError(f"Unknown obj_set: {obj_set}")
+
+        # Completely random selection for all components
+        # This ensures adjacent demos have no pattern/regularity
+        lo = 16
+        lo_offset = 0
+        lp = len(self.plate_names)
+        l1 = len(self.xyz_configs)
+        l2 = len(self.quat_configs)
+
+        # Randomly select main carrot
+        self.select_carrot_ids = torch.randint(low=lc_offset, high=lc_offset + lc, size=(b,), device=self.device)
+        
+        # Randomly select 3 extra carrots (different from main carrot and each other)
+        self.select_extra_ids = torch.zeros((b, 3), dtype=torch.long, device=self.device)
+        for i in range(b):
+            main_idx = self.select_carrot_ids[i].item() - lc_offset
+            # Get all available indices excluding the main carrot
+            available = torch.tensor([j for j in range(lc) if j != main_idx], device=self.device, dtype=torch.long)
+            # Randomly select 3 different extra carrots
+            selected = torch.randperm(len(available), device=self.device)[:3]
+            self.select_extra_ids[i] = available[selected] + lc_offset
+        
+        # Randomly select plate, overlay, and quaternion
+        self.select_plate_ids = torch.randint(low=0, high=lp, size=(b,), device=self.device)
+        self.select_overlay_ids = torch.randint(low=lo_offset, high=lo_offset + lo, size=(b,), device=self.device)
+        self.select_quat_ids = torch.randint(low=0, high=l2, size=(b,), device=self.device)
+        
+        # For positions: use quadrant-based selection
+        # Plate: select from center region
+        # 4 Carrots: each selects from one of the 4 quadrants (top-left, bottom-left, top-right, bottom-right)
+        # This ensures minimum distance >= 0.070m between plate and carrots, and >= 0.10m between carrots
+        grid_pos_tensor = torch.tensor(self.grid_pos, device=self.device)  # [num_grid_pos, 2]
+        center_region_tensor = torch.tensor(self.center_region_indices, device=self.device, dtype=torch.long)
+        
+        # Convert quadrant indices to tensors
+        # We've already verified that each quadrant has at least one position
+        quadrant_tensors = [
+            torch.tensor(quadrant_indices, device=self.device, dtype=torch.long)
+            for quadrant_indices in self.carrot_quadrant_indices
+        ]
+        
+        num_center_pos = len(self.center_region_indices)
+        
+        # Initialize position indices
+        self.select_carrot_grid_idx = torch.zeros((b,), dtype=torch.long, device=self.device)
+        self.select_plate_grid_idx = torch.zeros((b,), dtype=torch.long, device=self.device)
+        self.select_extra_grid_idx = torch.zeros((b, 3), dtype=torch.long, device=self.device)
+        
+        # Randomly assign 4 carrots to 4 quadrants for each batch item
+        for i in range(b):
+            # Select plate position from center region (random)
+            center_idx = torch.randint(low=0, high=num_center_pos, size=(1,), device=self.device)[0]
+            plate_grid_idx = center_region_tensor[center_idx]
+            
+            # Randomly assign 4 carrots to 4 quadrants
+            # Main carrot gets one quadrant, 3 extra carrots get the other 3 quadrants
+            quadrant_assignment = torch.randperm(4, device=self.device)  # Random permutation of [0,1,2,3]
+            
+            # Main carrot: assign to quadrant_assignment[0]
+            main_quadrant_idx = quadrant_assignment[0].item()
+            main_quadrant_tensor = quadrant_tensors[main_quadrant_idx]
+            main_quadrant_pos_idx = torch.randint(low=0, high=len(main_quadrant_tensor), size=(1,), device=self.device)[0]
+            carrot_grid_idx = main_quadrant_tensor[main_quadrant_pos_idx]
+            
+            # Extra carrots: assign to quadrant_assignment[1], [2], [3]
+            extra_indices = []
+            for j in range(3):
+                extra_quadrant_idx = quadrant_assignment[j + 1].item()
+                extra_quadrant_tensor = quadrant_tensors[extra_quadrant_idx]
+                extra_quadrant_pos_idx = torch.randint(low=0, high=len(extra_quadrant_tensor), size=(1,), device=self.device)[0]
+                extra_grid_idx = extra_quadrant_tensor[extra_quadrant_pos_idx]
+                extra_indices.append(extra_grid_idx.item())
+            
+            self.select_carrot_grid_idx[i] = carrot_grid_idx
+            self.select_plate_grid_idx[i] = plate_grid_idx
+            self.select_extra_grid_idx[i] = torch.tensor(extra_indices, device=self.device)
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        self._initialize_episode_pre(env_idx, options)
+
+        b = self.num_envs
+
+        # rgb overlay
+        sensor = self._sensor_configs[self.rgb_camera_name]
+        target_width = sensor.width
+        target_height = sensor.height
+        # Resize overlay images to match camera resolution if needed
+        overlay_images = []
+        for idx in self.select_overlay_ids:
+            img = self.overlay_images_numpy[idx]
+            if img.shape[1] != target_width or img.shape[0] != target_height:
+                img = cv2.resize(img, (target_width, target_height))
+            overlay_images.append(img)
+        overlay_images = np.stack(overlay_images)
+        self.overlay_images = torch.tensor(overlay_images, device=self.device)  # [b, H, W, 3]
+        
+        overlay_textures = []
+        for idx in self.select_overlay_ids:
+            tex = self.overlay_textures_numpy[idx]
+            if tex.shape[1] != target_width or tex.shape[0] != target_height:
+                tex = cv2.resize(tex, (target_width, target_height))
+            overlay_textures.append(tex)
+        overlay_textures = np.stack(overlay_textures)
+        self.overlay_textures = torch.tensor(overlay_textures, device=self.device)  # [b, H, W, 3]
+        overlay_mix = np.array([self.overlay_mix_numpy[idx] for idx in self.select_overlay_ids])
+        self.overlay_mix = torch.tensor(overlay_mix, device=self.device)  # [b]
+
+        # xyz and quat
+        quat_configs = torch.tensor(self.quat_configs, device=self.device)
+        grid_pos_tensor = torch.tensor(self.grid_pos, device=self.device)  # [num_grid_pos, 2]
+
+        select_carrot = [self.carrot_names[idx] for idx in self.select_carrot_ids]
+        select_plate = [self.plate_names[idx] for idx in self.select_plate_ids]
+        select_extra = [[self.carrot_names[self.select_extra_ids[i, j].item()] for j in range(3)] for i in range(b)]
+        carrot_actor = [self.objs_carrot[n] for n in select_carrot]
+        plate_actor = [self.objs_plate[n] for n in select_plate]
+        extra_actor = [[self.objs_carrot[n] for n in select_extra[i]] for i in range(b)]
+
+        # for motion planning capability
+        self.source_obj_name = select_carrot[0]
+        self.target_obj_name = select_plate[0]
+        self.objs = {
+            self.source_obj_name: carrot_actor[0],
+            self.target_obj_name: plate_actor[0]
+        }
+
+        # set pose for robot
+        self.agent.robot.set_pose(self.safe_robot_pos)
+
+        # set pose for objs
+        for idx, name in enumerate(self.model_db_carrot):
+            p_reset = torch.tensor([1.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
+            is_select = self.select_carrot_ids == idx  # [b]
+            # Use independently selected carrot position from grid_pos
+            carrot_grid_xy = grid_pos_tensor[self.select_carrot_grid_idx]  # [b, 2]
+            p_select = torch.cat([carrot_grid_xy, torch.full((b, 1), 0.95, device=self.device)], dim=1)  # [b, 3]
+            
+            is_select_extra = (self.select_extra_ids == idx).any(dim=1)  # [b]
+            # Check which extra position (0, 1, or 2) this carrot should be placed at
+            # Initialize with reset position to avoid zero positions
+            p_select_extra = p_reset.clone()  # Use reset position as default
+            for i in range(b):
+                if is_select_extra[i]:
+                    # Find which of the 3 extra positions this carrot should use
+                    if self.select_extra_ids[i, 0] == idx:
+                        extra_grid_xy = grid_pos_tensor[self.select_extra_grid_idx[i, 0]]  # [2]
+                        p_select_extra[i] = torch.cat([extra_grid_xy, torch.tensor([1.0], device=self.device)])
+                    elif self.select_extra_ids[i, 1] == idx:
+                        extra_grid_xy = grid_pos_tensor[self.select_extra_grid_idx[i, 1]]  # [2]
+                        p_select_extra[i] = torch.cat([extra_grid_xy, torch.tensor([1.0], device=self.device)])
+                    elif self.select_extra_ids[i, 2] == idx:
+                        extra_grid_xy = grid_pos_tensor[self.select_extra_grid_idx[i, 2]]  # [2]
+                        p_select_extra[i] = torch.cat([extra_grid_xy, torch.tensor([1.0], device=self.device)])
+                    # If none of the conditions matched, p_select_extra[i] remains as p_reset[i]
+            
+            p = torch.where(is_select.unsqueeze(1).repeat(1, 3), p_select, p_reset)  # [b, 3]
+            p = torch.where(is_select_extra.unsqueeze(1).repeat(1, 3), p_select_extra, p)  # [b, 3]
+
+            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 4]
+            q_select = quat_configs[self.select_quat_ids, 0].reshape(b, 4)  # [b, 4]
+            # For extra carrots, use the same quat config (they all use index 2, 3, or 4)
+            # Initialize with reset quaternion to avoid invalid zero quaternions
+            q_select_extra = q_reset.clone()  # Use reset quaternion as default
+            for i in range(b):
+                if is_select_extra[i]:
+                    # Find which of the 3 extra positions this carrot should use
+                    if self.select_extra_ids[i, 0] == idx:
+                        q_select_extra[i] = quat_configs[self.select_quat_ids[i], 2]
+                    elif self.select_extra_ids[i, 1] == idx:
+                        q_select_extra[i] = quat_configs[self.select_quat_ids[i], 3]
+                    elif self.select_extra_ids[i, 2] == idx:
+                        q_select_extra[i] = quat_configs[self.select_quat_ids[i], 4]
+                    # If none of the conditions matched, q_select_extra[i] remains as q_reset[i]
+            q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
+            q = torch.where(is_select_extra.unsqueeze(1).repeat(1, 4), q_select_extra, q)  # [b, 4]
+
+            self.objs_carrot[name].set_pose(Pose.create_from_pq(p=p, q=q))
+
+        for idx, name in enumerate(self.model_db_plate):
+            is_select = self.select_plate_ids == idx  # [b]
+            p_reset = torch.tensor([2.0, 0.3 * idx, 1.0], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 3]
+            # Use independently selected plate position from grid_pos
+            plate_grid_xy = grid_pos_tensor[self.select_plate_grid_idx]  # [b, 2]
+            p_select = torch.cat([plate_grid_xy, torch.full((b, 1), 0.92, device=self.device)], dim=1)  # [b, 3]
+            p = torch.where(is_select.unsqueeze(1).repeat(1, 3), p_select, p_reset)  # [b, 3]
+
+            q_reset = torch.tensor([0, 0, 0, 1], device=self.device).reshape(1, -1).repeat(b, 1)  # [b, 4]
+            q_select = quat_configs[self.select_quat_ids, 1].reshape(b, 4)  # [b, 4]
+            q = torch.where(is_select.unsqueeze(1).repeat(1, 4), q_select, q_reset)  # [b, 4]
+
+            self.objs_plate[name].set_pose(Pose.create_from_pq(p=p, q=q))
+
+        self._settle(0.5)
+
+        # Some objects need longer time to settle
+        c_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(carrot_actor)])
+        c_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(carrot_actor)])
+        p_lin = torch.stack([a.linear_velocity[i] for i, a in enumerate(plate_actor)])
+        p_ang = torch.stack([a.angular_velocity[i] for i, a in enumerate(plate_actor)])
+        
+        # Stack velocities for 3 extra carrots
+        e_lin_list = []
+        e_ang_list = []
+        for i in range(b):
+            for j in range(3):
+                e_lin_list.append(extra_actor[i][j].linear_velocity[i])
+                e_ang_list.append(extra_actor[i][j].angular_velocity[i])
+        e_lin = torch.stack(e_lin_list)  # [b*3, 3]
+        e_ang = torch.stack(e_ang_list)  # [b*3, 3]
+
+        lin_vel = torch.linalg.norm(c_lin) + torch.linalg.norm(p_lin) + torch.linalg.norm(e_lin, dim=1).sum()
+        ang_vel = torch.linalg.norm(c_ang) + torch.linalg.norm(p_ang) + torch.linalg.norm(e_ang, dim=1).sum()
+
+        if lin_vel > 1e-3 or ang_vel > 1e-2:
+            self._settle(6)
+
+        # measured values for bridge dataset
+        self.agent.robot.set_pose(self.initial_robot_pos)
+        self.agent.reset(init_qpos=self.initial_qpos)
+
+        # figure out object bounding boxes after settling. This is used to determine if an object is near the target object
+        self.carrot_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(carrot_actor)])  # [b, 4]
+        self.plate_q_after_settle = torch.stack([a.pose.q[idx] for idx, a in enumerate(plate_actor)])  # [b, 4]
+        corner_signs = torch.tensor([
+            [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
+            [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1]
+        ], device=self.device)
+
+        # carrot
+        carrot_bbox_world = torch.stack([self.model_bbox_sizes[n] for n in select_carrot])  # [b, 3]
+        c_bbox_half = carrot_bbox_world / 2  # [b, 3]
+        c_bbox_corners = c_bbox_half[:, None, :] * corner_signs[None, :, :]  # [b, 8, 3]
+
+        c_q_matrix = rotation_conversions.quaternion_to_matrix(self.carrot_q_after_settle)  # [b, 3, 3]
+        c_bbox_corners_rot = torch.matmul(c_bbox_corners, c_q_matrix.transpose(1, 2))  # [b, 8, 3]
+        c_rotated_bbox_size = c_bbox_corners_rot.max(dim=1).values - c_bbox_corners_rot.min(dim=1).values  # [b, 3]
+        self.carrot_bbox_world = c_rotated_bbox_size  # [b, 3]
+
+        # plate
+        plate_bbox_world = torch.stack([self.model_bbox_sizes[n] for n in select_plate])  # [b, 3]
+        p_bbox_half = plate_bbox_world / 2  # [b, 3]
+        p_bbox_corners = p_bbox_half[:, None, :] * corner_signs[None, :, :]  # [b, 8, 3]
+
+        p_q_matrix = rotation_conversions.quaternion_to_matrix(self.plate_q_after_settle)  # [b, 3, 3]
+        p_bbox_corners_rot = torch.matmul(p_bbox_corners, p_q_matrix.transpose(1, 2))  # [b, 8, 3]
+        p_rotated_bbox_size = p_bbox_corners_rot.max(dim=1).values - p_bbox_corners_rot.min(dim=1).values  # [b, 3]
+        self.plate_bbox_world = p_rotated_bbox_size  # [b, 3]
+
+        # stats to track
+        self.consecutive_grasp = torch.zeros((b,), dtype=torch.int32, device=self.device)
+        self.episode_stats = dict(
+            # all_obj_keep_height=torch.zeros((b,), dtype=torch.bool),
+            # moved_correct_obj=torch.zeros((b,), dtype=torch.bool),
+            # moved_wrong_obj=torch.zeros((b,), dtype=torch.bool),
+            # near_tgt_obj=torch.zeros((b,), dtype=torch.bool),
+            is_src_obj_grasped=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            # is_closest_to_tgt=torch.zeros((b,), dtype=torch.bool),
+            consecutive_grasp=torch.zeros((b,), dtype=torch.bool, device=self.device),
+            src_on_target=torch.zeros((b,), dtype=torch.bool, device=self.device),
+
+            gripper_carrot_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
+            gripper_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
+            carrot_plate_dist=torch.zeros((b,), dtype=torch.float32, device=self.device),
+        )
+        
+        # Store target carrot and plate actor IDs for bounding box computation
+        self.target_carrot_actor_id = self.objs[self.source_obj_name].per_scene_id[0].item()  # [1] -> scalar
+        self.target_plate_actor_id = self.objs[self.target_obj_name].per_scene_id[0].item()  # [1] -> scalar
+        self.target_carrot_name = self.source_obj_name  # Store the name for label
+
+    def get_target_carrot_bbox_2d(self, segmentation):
+        """
+        Compute 2D bounding box for the target carrot from segmentation.
+        
+        Args:
+            segmentation: Segmentation tensor of shape [b, H, W, ...] or [H, W, ...]
+        
+        Returns:
+            bbox: Tensor of shape [b, 4] or [4] with [xmin, ymin, xmax, ymax] format.
+                 Returns [0, 0, 0, 0] if carrot is not visible.
+        """
+        # Handle both batched and unbatched cases
+        if len(segmentation.shape) == 3:
+            segmentation = segmentation.unsqueeze(0)  # [1, H, W, ...]
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        actor_seg = segmentation[..., 0]  # [b, H, W]
+        b, H, W = actor_seg.shape
+        
+        # Get target carrot mask
+        target_carrot_id = torch.tensor(self.target_carrot_actor_id, device=actor_seg.device, dtype=actor_seg.dtype)
+        carrot_mask = (actor_seg == target_carrot_id)  # [b, H, W]
+        
+        # Compute bounding boxes
+        boxes = masks_to_boxes_pytorch(carrot_mask)  # [b, 4], [xmin, ymin, xmax, ymax]
+        
+        if squeeze_output:
+            boxes = boxes.squeeze(0)  # [4]
+        
+        return boxes
+
+    def get_target_plate_bbox_2d(self, segmentation):
+        """
+        Compute 2D bounding box for the target plate from segmentation.
+        
+        Args:
+            segmentation: Segmentation tensor of shape [b, H, W, ...] or [H, W, ...]
+        
+        Returns:
+            bbox: Tensor of shape [b, 4] or [4] with [xmin, ymin, xmax, ymax] format.
+                 Returns [0, 0, 0, 0] if plate is not visible.
+        """
+        # Handle both batched and unbatched cases
+        if len(segmentation.shape) == 3:
+            segmentation = segmentation.unsqueeze(0)  # [1, H, W, ...]
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        actor_seg = segmentation[..., 0]  # [b, H, W]
+        b, H, W = actor_seg.shape
+        
+        # Get target plate mask
+        target_plate_id = torch.tensor(self.target_plate_actor_id, device=actor_seg.device, dtype=actor_seg.dtype)
+        plate_mask = (actor_seg == target_plate_id)  # [b, H, W]
+        
+        # Compute bounding boxes
+        boxes = masks_to_boxes_pytorch(plate_mask)  # [b, 4], [xmin, ymin, xmax, ymax]
+        
+        if squeeze_output:
+            boxes = boxes.squeeze(0)  # [4]
+        
+        return boxes
 
 
 @register_env("PutOnPlateInScene25MultiPlate-v1", max_episode_steps=80, asset_download_ids=["bridge_v2_real2sim"])

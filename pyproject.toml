@@ -22,7 +22,7 @@ dependencies = [
   "packaging",
   "ninja",
   "typeguard",
-  "lerobot @ git+https://github.com/huggingface/lerobot@d602e8169cbad9e93a4a3b3ee1dd8b332af7ebf8",
+  "lerobot @ git+https://github.com/huggingface/lerobot@v0.4.2",
   "pdbpp>=0.11.7",
 ]
 
@@ -33,3 +33,9 @@ packages = []
 openvla = { path = "openvla", editable = true }
 mani_skill = { path = "ManiSkill", editable = true }
 simpler_env = { path = "SimplerEnv", editable = true }
+
+[tool.uv]
+override-dependencies = [
+    "gymnasium==0.29.1",
+    "numpy<2.0.0",        # Forces Numpy 1.x (Solving the ManiSkill vs Rerun conflict)
+]
